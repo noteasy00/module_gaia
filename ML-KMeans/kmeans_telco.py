@@ -149,7 +149,7 @@ plt.show()
 # =========================================
 # 여기서 elbow + churn gap + 해석 가능성을 보고 직접 선택
 # 3 또는 4 확인
-final_k = 3
+final_k = 2
 
 print(f"\n최종 선택 k: {final_k}")
 
@@ -253,7 +253,7 @@ diff_profile = raw_df.groupby("Cluster")[["tenure", "MonthlyCharges", "TotalChar
 print(diff_profile.round(2))
 
 # =========================================
-# 10. 결과 해석
+# 10. 자동 해석 문장
 # =========================================
 for c in sorted(raw_df["Cluster"].unique()):
     row = raw_df[raw_df["Cluster"] == c]
@@ -276,15 +276,15 @@ for c in sorted(raw_df["Cluster"].unique()):
 # =========================================
 # 11. 결과 저장
 # =========================================
-raw_df.to_csv("ML/result/telco_clustered_result.csv", index=False)
+raw_df.to_csv("telco_clustered_result.csv", index=False)
 
 joblib.dump({
     "preprocessor": preprocessor,
     "kmeans_model": final_kmeans,
     "cluster_features": cluster_features,
     "best_k": final_k
-}, "ML/telco_kmeans_model.pkl")
+}, "telco_kmeans_model.pkl")
 
 print("\n저장 완료:")
-print("- ML/result/telco_clustered_result.csv")
-print("- ML/telco_kmeans_model.pkl")
+print("- telco_clustered_result.csv")
+print("- telco_kmeans_model.pkl")
