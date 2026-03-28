@@ -27,7 +27,7 @@ from xgboost import XGBClassifier
 # 0. 설정 세팅
 # =========================================================
 FULL_PATH = "data/telco_churn_full.csv"
-TOP5_PATH = "data/telco_churn_top5.csv"
+TOP5_PATH = "data/telco_churn_top5_with_engineering_2.csv"
 
 SAVE_DIR = "models"
 os.makedirs(SAVE_DIR, exist_ok=True)
