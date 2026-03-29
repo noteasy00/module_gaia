@@ -1,17 +1,14 @@
 import os
-import json
+import pickle
 import warnings
 warnings.filterwarnings("ignore")
-
 import numpy as np
 import pandas as pd
-import joblib
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.metrics import (
-    classification_report,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -29,10 +26,12 @@ from xgboost import XGBClassifier
 FULL_PATH = "data/telco_churn_full.csv"
 TOP5_PATH = "data/telco_churn_top5_with_engineering_2.csv"
 
-SAVE_DIR = "models"
+SAVE_DIR = "ckpt"
+OUTPUT_DIR = "outputs"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 RANDOM_STATE = 42
+N_SPLITS = 5
 
 target_col = "Churn"
 
@@ -63,8 +62,7 @@ def build_preprocessor(X: pd.DataFrame) -> tuple[ColumnTransformer, list, list]:
     return preprocessor, numeric_features, categorical_features
 
 
-def tune_threshold(y_true: np.ndarray, prob: np.ndarray,
-                   thresholds: np.ndarray | None = None) -> tuple[float, float]:
+def tune_threshold(y_true, prob, thresholds=None):
     """
     validation F1 기준 최적 threshold 탐색
     """
@@ -84,135 +82,193 @@ def tune_threshold(y_true: np.ndarray, prob: np.ndarray,
     return best_thr, best_f1
 
 
-def evaluate_classifier(y_true: np.ndarray, prob: np.ndarray, threshold: float) -> dict:
+def evaluate_classifier(y_true, prob, threshold):
     """
     확률 + threshold 기반 평가
     """
     pred = (prob >= threshold).astype(int)
 
     metrics = {
-        "threshold": threshold,
-        "f1": f1_score(y_true, pred, zero_division=0),
-        "precision": precision_score(y_true, pred, zero_division=0),
-        "recall": recall_score(y_true, pred, zero_division=0),
-        "roc_auc": roc_auc_score(y_true, prob),
-        "pr_auc": average_precision_score(y_true, prob),
+        "threshold": float(threshold),
+        "f1": float(f1_score(y_true, pred, zero_division=0)),
+        "precision": float(precision_score(y_true, pred, zero_division=0)),
+        "recall": float(recall_score(y_true, pred, zero_division=0)),
+        "roc_auc": float(roc_auc_score(y_true, prob)),
+        "pr_auc": float(average_precision_score(y_true, prob)),
         "confusion_matrix": confusion_matrix(y_true, pred).tolist(),
-        "classification_report": classification_report(y_true, pred, zero_division=0, output_dict=True)
     }
     return metrics
 
 
-def train_one_dataset(csv_path: str, model_name: str) -> dict:
-    """
-    하나의 CSV에 대해:
-    - 데이터 로드
-    - train/valid/test 분리
-    - XGBClassifier 학습
-    - valid threshold tuning
-    - test 평가
-    """
-    print("\n" + "=" * 80)
-    print(f"[학습 시작] {model_name} | file={csv_path}")
-
-    df = pd.read_csv(csv_path)
-    print("shape:", df.shape)
-
-    X = df.drop(columns=[target_col]).copy()
-    y = df[target_col]
-
-    # train / temp
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        X, y,
-        test_size=0.3,
-        random_state=RANDOM_STATE,
-        stratify=y
-    )
-
-    # valid / test
-    X_valid, X_test, y_valid, y_test = train_test_split(
-        X_temp, y_temp,
-        test_size=0.5,
-        random_state=RANDOM_STATE,
-        stratify=y_temp
-    )
-
-    print("train:", X_train.shape, "valid:", X_valid.shape, "test:", X_test.shape)
-
-    preprocessor, numeric_features, categorical_features = build_preprocessor(X_train)
-
-    X_train_enc = preprocessor.fit_transform(X_train)
-    X_valid_enc = preprocessor.transform(X_valid)
-    X_test_enc = preprocessor.transform(X_test)
-
-    print("encoded train shape:", X_train_enc.shape)
-    print("numeric:", numeric_features)
-    print("categorical:", categorical_features)
-
-    # 불균형 데이터 보정
+def build_xgb_classifier(y_train):
     pos = int((y_train == 1).sum())
     neg = int((y_train == 0).sum())
     scale_pos_weight = neg / pos if pos > 0 else 1.0
 
     model = XGBClassifier(
-        n_estimators=400,
-        learning_rate=0.05,
-        max_depth=4,
-        min_child_weight=2,
+        n_estimators=500,
+        learning_rate= 0.05,
+        max_depth=3,
+        min_child_weight=3,
         subsample=0.85,
-        colsample_bytree=0.85,
-        reg_alpha=0.0,
-        reg_lambda=1.0,
+        colsample_bytree=1.0,
+        reg_alpha=0.1,
+        reg_lambda=5.0,
         objective="binary:logistic",
         eval_metric="logloss",
         random_state=RANDOM_STATE,
         n_jobs=-1,
         scale_pos_weight=scale_pos_weight
     )
+    return model
 
-    model.fit(X_train_enc, y_train)
 
-    valid_prob = model.predict_proba(X_valid_enc)[:, 1]
-    best_thr, best_valid_f1 = tune_threshold(y_valid.to_numpy(), valid_prob)
 
-    print(f"best threshold on valid: {best_thr:.2f}")
-    print(f"best valid F1: {best_valid_f1:.4f}")
+# 메인) 5-fold CV로 안정 threshold 찾아 학습
 
-    test_prob = model.predict_proba(X_test_enc)[:, 1]
-    test_metrics = evaluate_classifier(y_test.to_numpy(), test_prob, best_thr)
+def train_with_cv_threshold(csv_path: str, model_name: str) -> dict:
+    print("\n" + "=" * 80)
+    print(f"[학습 시작] {model_name} | file={csv_path}")
 
-    print("\n[test metrics]")
+    df = pd.read_csv(csv_path)
+    print("raw shape:", df.shape)
+
+    y = df[target_col]
+    X = df.drop(columns=[target_col]).copy()
+
+    # 먼저 test 홀드아웃
+    X_dev, X_test, y_dev, y_test = train_test_split(
+        X, y,
+        test_size=0.2,
+        random_state=RANDOM_STATE,
+        stratify=y
+    )
+    print("dev:", X_dev.shape, "test:", X_test.shape)
+
+    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
+
+    fold_rows = []
+    fold_thresholds = []
+    oof_prob = np.zeros(len(X_dev), dtype=float)
+
+    X_dev = X_dev.reset_index(drop=True)
+    y_dev = y_dev.reset_index(drop=True)
+
+    for fold, (tr_idx, va_idx) in enumerate(skf.split(X_dev, y_dev), start=1):
+        X_tr = X_dev.iloc[tr_idx].copy()
+        y_tr = y_dev.iloc[tr_idx].copy()
+        X_va = X_dev.iloc[va_idx].copy()
+        y_va = y_dev.iloc[va_idx].copy()
+
+        preprocessor, numeric_features, categorical_features = build_preprocessor(X_tr)
+
+        X_tr_enc = preprocessor.fit_transform(X_tr)
+        X_va_enc = preprocessor.transform(X_va)
+
+        model = build_xgb_classifier(y_tr)
+        model.fit(X_tr_enc, y_tr)
+
+        va_prob = model.predict_proba(X_va_enc)[:, 1]
+        oof_prob[va_idx] = va_prob
+
+        best_thr, best_f1 = tune_threshold(y_va.to_numpy(), va_prob)
+        fold_thresholds.append(best_thr)
+
+        fold_metrics = evaluate_classifier(y_va.to_numpy(), va_prob, best_thr)
+
+        fold_rows.append({
+            "fold": fold,
+            "threshold": best_thr,
+            "f1": fold_metrics["f1"],
+            "precision": fold_metrics["precision"],
+            "recall": fold_metrics["recall"],
+            "roc_auc": fold_metrics["roc_auc"],
+            "pr_auc": fold_metrics["pr_auc"]
+        })
+
+        print(f"\n[fold {fold}]")
+        print({
+            "threshold": round(best_thr, 3),
+            "f1": round(fold_metrics["f1"], 4),
+            "precision": round(fold_metrics["precision"], 4),
+            "recall": round(fold_metrics["recall"], 4),
+            "roc_auc": round(fold_metrics["roc_auc"], 4),
+            "pr_auc": round(fold_metrics["pr_auc"], 4)
+        })
+
+    cv_results_df = pd.DataFrame(fold_rows)
+
+    # threshold 집계
+    threshold_mean = float(np.mean(fold_thresholds))
+    threshold_median = float(np.median(fold_thresholds))
+
+    # median 추천 (이상치에 덜 민감)
+    stable_threshold = threshold_median
+
+    print("\n" + "-" * 80)
+    print("[CV threshold summary]")
+    print("fold thresholds:", [round(x, 3) for x in fold_thresholds])
+    print("mean threshold  :", round(threshold_mean, 4))
+    print("median threshold:", round(threshold_median, 4))
+    print("selected stable threshold:", round(stable_threshold, 4))
+
+    # OOF 전체 점수
+    oof_auc = roc_auc_score(y_dev, oof_prob)
+    oof_pr_auc = average_precision_score(y_dev, oof_prob)
+    oof_pred = (oof_prob >= stable_threshold).astype(int)
+    oof_f1 = f1_score(y_dev, oof_pred, zero_division=0)
+
+    print("\n[OOF metrics with stable threshold]")
+    print({
+        "oof_f1": round(oof_f1, 4),
+        "oof_roc_auc": round(oof_auc, 4),
+        "oof_pr_auc": round(oof_pr_auc, 4)
+    })
+
+    # dev 전체로 다시 학습
+    final_preprocessor, numeric_features, categorical_features = build_preprocessor(X_dev)
+    X_dev_enc = final_preprocessor.fit_transform(X_dev)
+    X_test_enc = final_preprocessor.transform(X_test)
+
+    final_model = build_xgb_classifier(y_dev)
+    final_model.fit(X_dev_enc, y_dev)
+
+    test_prob = final_model.predict_proba(X_test_enc)[:, 1]
+    test_metrics = evaluate_classifier(y_test.to_numpy(), test_prob, stable_threshold)
+
+    print("\n[test metrics with stable threshold]")
     print({
         "f1": round(test_metrics["f1"], 4),
         "precision": round(test_metrics["precision"], 4),
         "recall": round(test_metrics["recall"], 4),
         "roc_auc": round(test_metrics["roc_auc"], 4),
         "pr_auc": round(test_metrics["pr_auc"], 4),
-        "threshold": round(test_metrics["threshold"], 2)
+        "threshold": round(test_metrics["threshold"], 4)
     })
 
-    feature_columns = X.columns.tolist()
-
-    result = {
+    return {
         "model_name": model_name,
         "csv_path": csv_path,
         "target_col": target_col,
-        "feature_columns": feature_columns,
+        "feature_columns": X.columns.tolist(),
         "numeric_features": numeric_features,
         "categorical_features": categorical_features,
-        "threshold": best_thr,
-        "valid_f1": best_valid_f1,
+        "threshold": stable_threshold,
+        "cv_thresholds": fold_thresholds,
+        "cv_threshold_mean": threshold_mean,
+        "cv_threshold_median": threshold_median,
+        "cv_results": cv_results_df,
         "test_metrics": test_metrics,
-        "preprocessor": preprocessor,
-        "model": model
+        "preprocessor": final_preprocessor,
+        "model": final_model
     }
 
-    return result
 
 
-def save_bundle(result: dict, save_path: str):
+def save_pickle_bundle(result: dict, save_path: str):
     """
-    추론용 번들 저장
+    UI팀 / OpenAI agent팀이 바로 쓸 수 있게
+    필요한 정보 전부 묶어서 .pkl 저장
     """
     bundle = {
         "model_name": result["model_name"],
@@ -225,39 +281,52 @@ def save_bundle(result: dict, save_path: str):
         "preprocessor": result["preprocessor"],
         "model": result["model"]
     }
-    joblib.dump(bundle, save_path)
+
+    with open(save_path, "wb") as f:
+        pickle.dump(bundle, f)
+
+
+
+# =========================================================
+# 2. 모델 학습
+# =========================================================
+# 전체 피처 
+full_result = train_with_cv_threshold(FULL_PATH, "xgb_full_cv")
+
+# top5 피처 
+top5_result = train_with_cv_threshold(TOP5_PATH, "xgb_top5_cv")
+
 
 
 # =========================================================
-# 2. 전체 피처 모델 학습
+# 3. 결과 비교
 # =========================================================
-full_result = train_one_dataset(FULL_PATH, model_name="xgb_full")
-
-# =========================================================
-# 3. top5 피처 모델 학습
-# =========================================================
-top5_result = train_one_dataset(TOP5_PATH, model_name="xgb_top5")
-
-# =========================================================
-# 4. 결과 비교
-# =========================================================
-summary_rows = []
-
-for res in [full_result, top5_result]:
-    m = res["test_metrics"]
-    summary_rows.append({
-        "model_name": res["model_name"],
-        "num_input_features": len(res["feature_columns"]),
-        "valid_f1": res["valid_f1"],
-        "test_f1": m["f1"],
-        "test_precision": m["precision"],
-        "test_recall": m["recall"],
-        "test_roc_auc": m["roc_auc"],
-        "test_pr_auc": m["pr_auc"],
-        "threshold": res["threshold"]
-    })
-
-summary_df = pd.DataFrame(summary_rows).sort_values(
+summary_df = pd.DataFrame([
+    {
+        "model_name": full_result["model_name"],
+        "num_input_features": len(full_result["feature_columns"]),
+        "cv_threshold_mean": full_result["cv_threshold_mean"],
+        "cv_threshold_median": full_result["cv_threshold_median"],
+        "selected_threshold": full_result["threshold"],
+        "test_f1": full_result["test_metrics"]["f1"],
+        "test_precision": full_result["test_metrics"]["precision"],
+        "test_recall": full_result["test_metrics"]["recall"],
+        "test_roc_auc": full_result["test_metrics"]["roc_auc"],
+        "test_pr_auc": full_result["test_metrics"]["pr_auc"]
+    },
+    {
+        "model_name": top5_result["model_name"],
+        "num_input_features": len(top5_result["feature_columns"]),
+        "cv_threshold_mean": top5_result["cv_threshold_mean"],
+        "cv_threshold_median": top5_result["cv_threshold_median"],
+        "selected_threshold": top5_result["threshold"],
+        "test_f1": top5_result["test_metrics"]["f1"],
+        "test_precision": top5_result["test_metrics"]["precision"],
+        "test_recall": top5_result["test_metrics"]["recall"],
+        "test_roc_auc": top5_result["test_metrics"]["roc_auc"],
+        "test_pr_auc": top5_result["test_metrics"]["pr_auc"]
+    }
+]).sort_values(
     by=["test_f1", "test_roc_auc", "test_pr_auc"],
     ascending=False
 ).reset_index(drop=True)
@@ -266,37 +335,29 @@ print("\n" + "=" * 80)
 print("[최종 비교 결과]")
 print(summary_df)
 
-summary_df.to_csv(os.path.join(SAVE_DIR, "model_comparison_summary.csv"), index=False)
+summary_df.to_csv(os.path.join(OUTPUT_DIR, "cv_threshold_model_comparison.csv"), index=False)
+print("-", os.path.join(OUTPUT_DIR, "cv_threshold_model_comparison.csv"))
+
 
 # =========================================================
-# 5. 최종 모델 선택 및 저장
+# 3. 결과 저장
 # =========================================================
+
+# fold별 csv
+full_result["cv_results"].to_csv(os.path.join(OUTPUT_DIR, "xgb_full_cv_fold_results.csv"), index=False)
+top5_result["cv_results"].to_csv(os.path.join(OUTPUT_DIR, "xgb_top5_cv_fold_results.csv"), index=False)
+
+# pkl 저장
+save_pickle_bundle(full_result, os.path.join(SAVE_DIR, "xgb_full_cv.pkl"))
+save_pickle_bundle(top5_result, os.path.join(SAVE_DIR, "xgb_top5_cv.pkl"))
+
 best_name = summary_df.iloc[0]["model_name"]
-best_result = full_result if best_name == "xgb_full" else top5_result
+best_result = full_result if best_name == "xgb_full_cv" else top5_result
+save_pickle_bundle(best_result, os.path.join(SAVE_DIR, "final_selected_model_cv.pkl"))
 
-final_model_path = os.path.join(SAVE_DIR, "best_telco_churn_model.joblib")
-save_bundle(best_result, final_model_path)
+print("\n 모델 저장 완료 ")
+print("-", os.path.join(SAVE_DIR, "xgb_full_cv.pkl"))
+print("-", os.path.join(SAVE_DIR, "xgb_top5_cv.pkl"))
+print("-", os.path.join(SAVE_DIR, "final_selected_model_cv.pkl"))
 
-print("\n" + "=" * 80)
-print("[최종 선택 모델]")
-print("best model:", best_name)
-print("saved to:", final_model_path)
-
-# JSON 요약도 저장
-final_summary = {
-    "best_model": best_name,
-    "threshold": float(best_result["threshold"]),
-    "feature_columns": best_result["feature_columns"],
-    "test_metrics": {
-        "f1": float(best_result["test_metrics"]["f1"]),
-        "precision": float(best_result["test_metrics"]["precision"]),
-        "recall": float(best_result["test_metrics"]["recall"]),
-        "roc_auc": float(best_result["test_metrics"]["roc_auc"]),
-        "pr_auc": float(best_result["test_metrics"]["pr_auc"])
-    }
-}
-
-with open(os.path.join(SAVE_DIR, "best_model_summary.json"), "w", encoding="utf-8") as f:
-    json.dump(final_summary, f, ensure_ascii=False, indent=2)
-
-print("summary saved to:", os.path.join(SAVE_DIR, "best_model_summary.json"))
+print("\n << ui, agent, tool팀 xgb_top5_cv.pkl 사용하면 됩니다 (telco_churn_top5_with_engineering_2.csv 데이터셋 사용) >>")
