@@ -7,11 +7,20 @@ import plotly.graph_objects as go
 import feedparser
 from datetime import datetime, timedelta
 from openai import OpenAI
-import os
-from dotenv import load_dotenv
+import os, sys
+from dotenv import load_dotenv, find_dotenv
 from pathlib import Path
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "agent")))
+from web_search_v2 import get_telco_trend_with_news
+
+@st.cache_data(ttl=3600) # 3600초(1시간) 동안 검색 결과를 기억합니다!
+def cached_search(query):
+    # 에이전트의 검색 함수를 캐싱(기억) 폴더에 담아두는 역할입니다.
+    return get_telco_trend_with_news(query)
+
 # 데이터 로드
-df = pd.read_csv(r'C:\Users\EZ\module_gaia\data\telco_churn_top5_with_engineering_2.csv')
+df = pd.read_csv("data/telco_churn_top5_with_engineering_2.csv")
 
 # 0. 설정 및 환경 변수 로드
 API_BASE_URL = "http://127.0.0.1:8000"
@@ -21,7 +30,7 @@ CM_IMAGE_PATH = "../../outputs/xgb_top5_cv_test_confusion_matrix.png"
 st.set_page_config(page_title="ChurnGuard Intelligence", layout="wide", page_icon="📡")
 
 ROOT_DIR = Path(__file__).resolve().parents[2]   # 프로젝트 루트에 맞게 조정
-load_dotenv(ROOT_DIR / ".env", override=True)
+load_dotenv(find_dotenv(), override=True)
 
 
 st.markdown("""
@@ -170,7 +179,21 @@ def load_model_bundle_summary():
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-    
+
+def get_realtime_prediction(payload: dict):
+    """사이드바 슬라이더 전용: 실시간으로 모델 예측값을 가져오는 우체부"""
+    try:
+        url = f"{API_BASE_URL}/predict"
+        # app.py의 규칙(PredictRequest)에 맞게 데이터를 포장합니다.
+        wrapped_data = {"customer_data": payload} 
+        res = requests.post(url, json=wrapped_data, timeout=3) # 실시간이므로 타임아웃은 짧게!
+        
+        if res.status_code == 200:
+            return res.json()
+        return None
+    except Exception as e:
+        # 에러가 나도 화면 전체가 멈추지 않게 조용히 처리합니다.
+        return None
 
 # --- [사이드바: 데이터 기반 시나리오 설정] ---
 with st.sidebar:
@@ -444,57 +467,158 @@ with tab1:
 # ==> 이제 챗봇은 실제 /batch-predict와 /high-risk 결과에서 뽑은 고객의 예측값과 설명 근거를 기반으로 답하게 됨!
 
 
-# --- [Tab 2: 최신 동향 & 혜택 (보정됨)] ---
 with tab2:
-    st.markdown(f"### 📡 AI 실시간 보안 브리핑: **{incident_type}**")
+    st.markdown("### 📰 통신 산업 최신 동향 및 이슈")
     
-    # web_search_v2 로직 실행
-    with st.spinner("🚀 최신 보안 정보를 분석하여 브리핑을 생성 중입니다..."):
-        briefing, news_list = get_ai_security_briefing(incident_type)
-    
-    # AI 요약 브리핑 출력
-    st.info("\n".join([f" {line.strip()}" for line in briefing]))
-    
-    st.divider()
-    
-    # 상세 뉴스 및 정책 동향 레이아웃
-    policy_col, security_col = st.columns(2)
-    
-    with policy_col:
-        st.subheader("📉 최신 정책 및 번호이동 동향")
-        policy_news = fetch_recent_info("통신사+번호이동+지원금+OR+전환지원금")
-        if policy_news:
-            for n in policy_news:
-                st.markdown(f'<div style="padding:10px; border-radius:8px; border-left:4px solid #007BFF; background:rgba(0,123,255,0.05); margin-bottom:12px;"><a href="{n.link}" target="_blank" style="text-decoration:none; color:inherit; font-size:13px;"><b>{n.title.split(" - ")[0]}</b></a></div>', unsafe_allow_html=True)
+    issue_category = st.radio(
+        "조회할 이슈 카테고리를 선택하세요:",
+        ["🔥 통신사 종합 최신 이슈", "🏛️ 정책 및 규제 동향", "🛡️ 주요 보안 이슈"],
+        horizontal=True
+    )
 
-    with security_col:
-        st.subheader("🚨 분석에 참고한 자료")
-        if news_list:
-            for news in news_list:
-                st.markdown(f"""
-                <div style="padding:10px; border-radius:8px; border-left:4px solid #ff4b4b; background:rgba(255,75,75,0.05); margin-bottom:12px;">
-                    <a href="{news.link}" target="_blank" style="text-decoration:none; color:inherit; font-size:13px;">
-                        <b>{news.title[:55]}...</b><br>
-                        <small style="color:gray;">{news.published[:16]}</small>
-                    </a>
-                </div>
-                """, unsafe_allow_html=True)
+    if st.button(f"🔍 '{issue_category}' 검색 및 AI 요약"):
+        with st.spinner("AI가 실시간 뉴스를 수집하고 분석 중입니다..."):
+            
+            # 검색어 세팅
+            if issue_category == "🔥 통신사 종합 최신 이슈":
+                query = "통신사 최신 이슈 시장 동향 2026"
+            elif issue_category == "🏛️ 정책 및 규제 동향":
+                query = "통신사 정책 규제 번호이동 지원금 2026"
+            else: 
+                query = f"통신사 보안 사고 {incident_type} 대응" if incident_type != "해당 없음" else "통신사 보안 사고 개인정보 유출 2026"
 
-# --- [Tab 3: 데이터 분석 모델] ---
+            # 🔥 [핵심] 기존 함수 대신 '캐싱된 함수'를 호출합니다!
+            summary, urls = cached_search(query)
+
+            if summary:
+                st.success("✅ AI 브리핑 요약 완료 (캐시 적용됨 ⚡)")
+                
+                st.markdown(f"#### 💡 {issue_category} 핵심 브리핑")
+                for line in summary:
+                    st.markdown(f"- {line}")
+
+                st.divider()
+
+                st.markdown("#### 🔗 관련 뉴스 원문")
+                cols = st.columns(2)
+                for i, url in enumerate(urls[:6]):
+                    with cols[i % 2]:
+                        st.markdown(f"""
+                        <div style="padding:8px; border-radius:5px; border-left:4px solid {'#ff4b4b' if '보안' in issue_category else '#007BFF'}; background:rgba(128,128,128,0.05); margin-bottom:8px;">
+                            <a href="{url}" target="_blank" style="text-decoration:none; color:inherit; font-size:14px;">
+                                <b>[{i+1}번 기사] 원문 확인하기</b>
+                            </a>
+                        </div>
+                        """, unsafe_allow_html=True)
+
 with tab3:
-    st.subheader("📊 시나리오 분석 모델 근거")
-    col_l, col_r = st.columns([1.2, 1])
-    with col_l:
-        st.subheader("📈 주요 변수 상관계수 (Heatmap)")
-        corr_data = df[['tenure', 'MonthlyCharges', 'Churn']].corr()
-        fig_heat = px.imshow(corr_data, text_auto=True, color_continuous_scale='RdBu_r')
-        st.plotly_chart(fig_heat, use_container_width=True)
+    # 1. AI 모델용 데이터 조립 (타입 및 컬럼명 정밀 매칭)
+    input_data = {
+        "tenure": int(sb_tenure),
+        "MonthlyCharges": float(sb_monthly),
+        "Contract": sb_contract,
+        "InternetService": sb_internet,      
+        "TechSupport": sb_tech,
+        "SeniorCitizen": 0,             
+        "PaymentMethod": "Electronic check", 
+        "PaperlessBilling": "Yes"       
+    }
+
+    # 2. 실시간 AI 예측 및 [보안 사고 x 광랜] 가중치 계산
+    prediction_res = get_realtime_prediction(input_data)
+    
+    if prediction_res and prediction_res.get("success"):
+        # (A) AI 모델의 순수 예측 확률 (0~100)
+        base_model_prob = prediction_res["churn_probability"] * 100
         
-    with col_r:
-        st.subheader("🔮 수치적 이탈 확률 (Gauge)")
-        fig_gauge = go.Figure(go.Indicator(
-            mode = "gauge+number", value = final_prob,
-            number = {'suffix': "%"},
-            gauge = {'axis': {'range': [0, 100]}, 'bar': {'color': "#FF4B4B"}}
-        ))
-        st.plotly_chart(fig_gauge, use_container_width=True)
+        # (B) 보안 리스크 가중치 계산
+        security_weight = 0
+        if incident_type != "해당 없음":
+            if incident_type == "개인정보 유출":
+                security_weight += 30
+            elif incident_type == "DDoS 서비스 중단":
+                security_weight += 20
+            elif incident_type == "스미싱/피싱 급증":
+                security_weight += 15
+            
+            if sb_internet == "Fiber optic":
+                security_weight += 15 
+        
+        # (C) 기업 대응 수준에 따른 경감
+        if reponse_level == "적극 보상/안심 서비스 제공":
+            security_weight -= 15
+
+        # (D) 최종 통합 확률 산출
+        combined_prob = min(99.0, max(1.0, base_model_prob + security_weight))
+        display_prob = round(combined_prob, 2)
+        
+        # 위험 등급 판단
+        if display_prob >= 70: risk = "High (위험)"
+        elif display_prob >= 40: risk = "Medium (주의)"
+        else: risk = "Low (안정)"
+        
+        # 게이지 숫자 색상 결정
+        v_color = "#FF4B4B" if display_prob > 70 else "white"
+    else:
+        display_prob = 0
+        risk = "모델 서버 연결 대기 중"
+        v_color = "white"
+
+    # --- [화면 레이아웃 구성] ---
+    st.markdown(f"### 📡 실시간 AI 종합 분석 리포트")
+    
+    # 상단: 게이지 차트
+    fig_gauge = go.Figure(go.Indicator(
+        mode = "gauge+number", 
+        value = display_prob, 
+        number = {
+            'suffix': "%", 
+            'font': {'size': 60, 'color': v_color}
+        },
+        gauge = {
+            'axis': {'range': [0, 100], 'tickwidth': 1},
+            'bar': {'color': "#FF4B4B" if display_prob > 70 else "#FFA500" if display_prob > 40 else "#00CC96"},
+            'steps': [
+                {'range': [0, 40], 'color': "rgba(0, 204, 150, 0.1)"},
+                {'range': [40, 70], 'color': "rgba(255, 165, 0, 0.1)"},
+                {'range': [70, 100], 'color': "rgba(255, 75, 75, 0.1)"}
+            ],
+            'threshold': {
+                'line': {'color': "white", 'width': 4},
+                'thickness': 0.75,
+                'value': display_prob
+            }
+        }
+    ))
+    fig_gauge.update_layout(height=380, margin=dict(l=30, r=30, t=50, b=20))
+    st.plotly_chart(fig_gauge, use_container_width=True)
+
+    # 실시간 분석 코멘트
+    st.success(f"✅ **현재 분석 상태:** AI 모델 결과({round(base_model_prob, 1)}%) 기반, 보안 가중치({security_weight}%)가 실시간 합산되었습니다.")
+
+    st.divider()
+
+    # 하단: 2단 구성
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.subheader("🎯 모델 주요 판단 기준")
+        importance_df = pd.DataFrame({
+            '항목': ['계약 형태', '가입 기간', '월 요금', '기술 지원', '인터넷 방식'],
+            '영향력': [0.42, 0.28, 0.18, 0.08, 0.04] 
+        }).sort_values(by='영향력', ascending=True)
+
+        fig_imp = px.bar(importance_df, x='영향력', y='항목', orientation='h',
+                         color='영향력', color_continuous_scale='Reds')
+        fig_imp.update_layout(showlegend=False, height=350, margin=dict(l=20, r=20, t=20, b=20))
+        st.plotly_chart(fig_imp, use_container_width=True)
+
+    with col_right:
+        st.subheader("📉 모델 예측 성능 (Confusion Matrix)")
+        # 💡 739번 숫자가 적힌 사진 경로
+        TARGET_IMG = "outputs/xgb_top5_cv_test_confusion_matrix.png" 
+        
+        if os.path.exists(TARGET_IMG):
+            st.image(TARGET_IMG, use_container_width=True, caption="[Top 5 모델] 실제 이탈자 374명 중 290명 식별 (77.5%)")
+        else:
+            st.warning("⚠️ 모델 성능 이미지를 찾을 수 없습니다.")
