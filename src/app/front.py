@@ -4,8 +4,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import feedparser
-from datetime import datetime, timedelta
+from datetime import datetime
 from openai import OpenAI
 import os, sys
 from dotenv import load_dotenv, find_dotenv
@@ -109,41 +108,6 @@ TRUSTED_DOMAINS = [
     "zdnet.co.kr", "etnews.com", "mk.co.kr", "digitaltoday.co.kr", 
     "go.kr", "korea.kr", "msit.go.kr", "kisa.or.kr"
 ]
-
-@st.cache_data(ttl=600)
-def get_ai_security_briefing(incident_type):
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    # 1. Filter: 신뢰 도메인 쿼리 생성
-    site_filter = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS])
-    
-    if incident_type == "해당 없음":
-        query = f"통신사 보안 트렌드 뉴스 ({site_filter})"
-    else:
-        query = f"최신 {incident_type} 사고 사례 뉴스 대응 ({site_filter})"
-    
-    # 2. Crawl: 데이터 수집
-    rss_url = f"https://news.google.com/rss/search?q={query.replace(' ', '+')}&hl=ko&gl=KR&ceid=KR:ko"
-    feed = feedparser.parse(rss_url)
-    if not feed.entries: return ["관련 정보를 찾을 수 없습니다."], []
-
-    # 3. Summarize: AI 요약
-    titles_text = "\n".join([f"- {e.title}" for e in feed.entries[:7]])
-    summary_prompt = f"""
-    보안 분석가로서 아래 뉴스 제목들을 읽고 '{incident_type}' 관련 핵심 이슈를 딱 3줄 요약해줘.
-    - 한 줄당 하나의 핵심 내용만 담을 것.
-    - 정책보다는 실제 사고와 뉴스 중심으로 작성할 것.
-    
-    내용:
-    {titles_text}
-    """
-    
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": summary_prompt}]
-    )
-    summary = response.choices[0].message.content.strip().split('\n')
-    return summary, feed.entries[:6]
-
 # 추가
 def post_json(endpoint: str, payload: dict):
     url = f"{API_BASE_URL}{endpoint}"
