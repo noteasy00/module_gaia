@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 current_dir = os.path.dirname(os.path.abspath(__file__))
 tools_folder = os.path.abspath(os.path.join(current_dir, '..', 'tools'))
 sys.path.append(tools_folder)
-from src.tools.web_search_v2 import get_telco_trend_with_news
+#from src.tools.web_search_v2 import get_telco_trend_with_news
 
 ROOT_DIR = Path(__file__).resolve().parents[2]   # 프로젝트 루트에 맞게 조정
 load_dotenv(ROOT_DIR / ".env", override=True)

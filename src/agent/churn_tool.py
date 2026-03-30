@@ -3,8 +3,10 @@ from functools import lru_cache
 from typing import Any
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
-BUNDLE_PATH = "../../ckpt/xgb_top5_cv.pkl"
+BASE_DIR = Path(__file__).resolve().parents[2]   # module_gaia/
+BUNDLE_PATH = BASE_DIR / "ckpt" / "xgb_top5_cv.pkl"
 DROP_COLS = ["Churn"]
 
 

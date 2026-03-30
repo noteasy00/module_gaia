@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 
-from churn_tool import (
+from .churn_tool import (
     predict_churn,
     simulate_churn_change,
     batch_predict,
@@ -14,7 +14,6 @@ app = FastAPI(
     description="FastAPI service for churn prediction, explanation, simulation, and batch scoring",
     version="1.0.0"
 )
-
 
 class PredictRequest(BaseModel):
     customer_data: Dict[str, Any] = Field(..., description="Single customer record")
@@ -70,13 +69,18 @@ def simulate(request: SimulateRequest):
 
 @app.post("/batch-predict")
 def batch_predict_api(request: BatchPredictRequest):
-    result = batch_predict(request.customers)
+    try:
+        print(f"[DEBUG] /batch-predict rows={len(request.customers)}")
+        result = batch_predict(request.customers)
+        print("[DEBUG] result:", result)
 
-    if not result.get("success", False):
-        raise HTTPException(status_code=500, detail=result.get("error", "Batch prediction failed"))
+        if not result.get("success", False):
+            raise HTTPException(status_code=500, detail=result.get("error", "Batch prediction failed"))
 
-    return result
-
+        return result
+    except Exception as e:
+        print("[ERROR] /batch-predict exception:", repr(e))
+        raise
 
 @app.post("/high-risk")
 def high_risk_api(request: HighRiskRequest):
