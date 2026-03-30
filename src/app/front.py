@@ -1,3 +1,5 @@
+import requests
+import pickle
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -7,13 +9,20 @@ from datetime import datetime, timedelta
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
-
+from pathlib import Path
 # 데이터 로드
-df = pd.read_csv('telco_churn_full.csv')
+df = pd.read_csv(r'C:\Users\EZ\module_gaia\data\telco_churn_top5_with_engineering_2.csv')
 
 # 0. 설정 및 환경 변수 로드
+API_BASE_URL = "http://127.0.0.1:8000"
+BUNDLE_PATH = "../../ckpt/xgb_top5_cv.pkl"
+CM_IMAGE_PATH = "../../outputs/xgb_top5_cv_test_confusion_matrix.png"
+
 st.set_page_config(page_title="ChurnGuard Intelligence", layout="wide", page_icon="📡")
-load_dotenv() 
+
+ROOT_DIR = Path(__file__).resolve().parents[2]   # 프로젝트 루트에 맞게 조정
+load_dotenv(ROOT_DIR / ".env", override=True)
+
 
 st.markdown("""
     <style>
@@ -141,6 +150,28 @@ def fetch_recent_info(query, months_back=2):
         except: continue
     return filtered[:5]
 
+# 추가
+def post_json(endpoint: str, payload: dict):
+    url = f"{API_BASE_URL}{endpoint}"
+    res = requests.post(url, json=payload, timeout=60)
+    res.raise_for_status()
+    return res.json()
+
+@st.cache_data(show_spinner=False)
+def load_model_bundle_summary():
+    try:
+        with open(BUNDLE_PATH, "rb") as f:
+            bundle = pickle.load(f)
+        return {
+            "success": True,
+            "model_name": bundle.get("model_name", "xgb_top5_cv"),
+            "threshold": bundle.get("threshold"),
+            "test_metrics": bundle.get("test_metrics", {})
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    
+
 # --- [사이드바: 데이터 기반 시나리오 설정] ---
 with st.sidebar:
     st.title("🛠️ Scenario Builder")
@@ -203,39 +234,215 @@ st.markdown(f"<p style='text-align: center; color: #888;'>분석 기준일: {dat
 
 tab1, tab2, tab3 = st.tabs(["🤖 AI 컨설턴트 브리핑", "📰 최신 정책 및 보안 이슈", "📊 데이터 분석 모델"])
 
-# --- [Tab 1: 챗봇] ---
+# --- [Tab 1: 챗봇, 고객이 파일을 업로드하면 api가 batch prediction 수행, 고위험 고객 추출, 시뮬레이션 ] ---
 with tab1:
     st.subheader("💬 실시간 전략 시뮬레이션")
-    uploaded_file = st.file_uploader("📄 고객 데이터나 보안 리포트를 업로드하여 분석을 요청하세요 (CSV, PDF, TXT)", type=["csv", "pdf", "txt"])
+
+    uploaded_file = st.file_uploader(
+        "📄 고객 데이터나 보안 리포트를 업로드하여 분석을 요청하세요 (CSV, PDF, TXT)", 
+        type=["csv", "pdf", "txt"]
+        )
+    
     if uploaded_file is not None:
-        st.success(f"'{uploaded_file.name}' 파일 업로드 완료. AI가 내용을 참고합니다.")
+        try:
+            uploaded_df = pd.read_csv(uploaded_file)
+            st.success(f"'{uploaded_file.name}' 파일 업로드 완료. AI가 내용을 참고합니다.")
+            st.write("업로드 데이터 미리보기", uploaded_df.head())
+            
+            customers = uploaded_df.to_dict(orient="records")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                if st.button("전체 고객 배치 예측 실행"):
+                    with st.spinner("고객별 이탈 확률을 예측하는 중입니다 ..."):
+                        result = post_json("/batch-predict", {"customers": customers})
+                    
+                    if result.get("success"):
+                        result_df = pd.DataFrame(result["results"])
+                        st.session_state["batch_result_df"] = result_df
+                        st.success(f"{result['count']}명 예측 완료")
+                    else:
+                        st.error(result.get("error", "배치 예측 실패"))
+            with col2:
+                if st.button("고위험 고객만 추출"):
+                    with st.spinner("고위험 고객을 추출하는 중입니다..."):
+                        result = post_json("/high-risk", {
+                            "customers": customers,
+                            "threshold": 0.7,
+                            "limit": 20
+                        })
+
+                    if result.get("success"):
+                        high_risk_df = pd.DataFrame(result["results"])
+                        st.session_state["high_risk_df"] = high_risk_df
+                        st.success(f"고위험 고객 {result['count']}명 추출 완료")
+                    else:
+                        st.error(result.get("error", "고위험 고객 추출 실패"))
+            if "batch_result_df" in st.session_state:
+                st.divider()
+                st.subheader("📊 전체 예측 결과")
+                batch_result_df = st.session_state["batch_result_df"]
+                show_cols = [c for c in [
+                    "customer_id", "churn_probability", "prediction_label", "risk_level"
+                ] if c in batch_result_df.columns]
+
+                st.dataframe(batch_result_df[show_cols], use_container_width=True)
+            if "high_risk_df" in st.session_state:
+                st.divider()
+                st.subheader("🚨 고위험 고객 리스트")
+                high_risk_df = st.session_state["high_risk_df"]
+
+                if len(high_risk_df) == 0:
+                    st.info("설정 threshold 이상인 고객이 없습니다.")
+                else:
+                    show_cols = [c for c in [
+                        "customer_id", "churn_probability", "prediction_label", "risk_level"
+                    ] if c in high_risk_df.columns]
+
+                    st.dataframe(high_risk_df[show_cols], use_container_width=True)
+
+                    # 고객 선택 후 explanation / simulation
+                    selectable_ids = high_risk_df["customer_id"].astype(str).tolist()
+                    selected_id = st.selectbox("상세 분석할 고객 선택", selectable_ids)
+
+                    selected_row = high_risk_df[
+                        high_risk_df["customer_id"].astype(str) == str(selected_id)
+                    ].iloc[0]
+
+                    st.markdown("### 고객 설명")
+                    explanations = selected_row.get("explanations", [])
+                    if explanations:
+                        for exp in explanations:
+                            st.write(f"- {exp}")
+
+                    customer_data = selected_row.get("customer_data", {})
+                    st.session_state["selected_customer_data"] = customer_data
+                    st.session_state["selected_customer_result"] = {
+                        "customer_id": selected_row.get("customer_id"),
+                        "churn_probability": selected_row.get("churn_probability"),
+                        "risk_level": selected_row.get("risk_level"),
+                        "prediction_label": selected_row.get("prediction_label"),
+                        "explanations": selected_row.get("explanations", [])
+                    }
+                    st.markdown("### 혜택 적용 시뮬레이션")
+                    discount_rate = st.slider("월 요금 할인율", 0, 30, 10, 5)
+                    sim_customer = customer_data.copy()
+
+                    if "MonthlyCharges" in sim_customer:
+                        try:
+                            original_charge = float(sim_customer["MonthlyCharges"])
+                            sim_customer["MonthlyCharges"] = round(
+                                original_charge * (1 - discount_rate / 100), 2
+                            )
+                        except Exception:
+                            pass
+
+                    if st.button("선택 고객 시뮬레이션 실행"):
+                        with st.spinner("혜택 적용 전후 위험도를 비교하는 중입니다..."):
+                            sim_result = post_json("/simulate", {
+                                "customer_data": customer_data,
+                                "changes": {"MonthlyCharges": sim_customer.get("MonthlyCharges")}
+                            })
+
+                        if sim_result.get("success"):
+                            before_prob = sim_result["before"]["churn_probability"]
+                            after_prob = sim_result["after"]["churn_probability"]
+                            delta = sim_result["probability_change"]
+
+                            s1, s2, s3 = st.columns(3)
+                            s1.metric("변경 전", before_prob)
+                            s2.metric("변경 후", after_prob)
+                            s3.metric("변화량", delta)
+
+                            st.success(sim_result["impact"])
+                        else:
+                            st.error(sim_result.get("error", "시뮬레이션 실패"))
+        
+        except Exception as e:
+            st.error(f"파일 처리 실패: {e}")
+    else:
+        st.info("CSV 파일을 업로드하면 고객별 이탈 확률 예측과 고위험 고객 추출이 가능합니다.")
+    
+
 
     st.divider()
-    
-    if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "안녕하십니까. 현재 설정된 시나리오를 바탕으로 대응 전략을 구성해 드립니다."}]
+    st.subheader("🤖 고객 맞춤 전략 챗봇")
 
-    chat_holder = st.container(height=450)
-    with chat_holder:
-        for m in st.session_state.messages:
-            with st.chat_message(m["role"]): st.markdown(m["content"])
+    if "selected_customer_data" not in st.session_state or "selected_customer_result" not in st.session_state:
+        st.info("먼저 고위험 고객 리스트에서 고객을 선택하면, 해당 고객 기준으로 전략 상담을 할 수 있습니다.")
+    else:
+        selected_customer_data = st.session_state["selected_customer_data"]
+        selected_customer_result = st.session_state["selected_customer_result"]
 
-    if prompt := st.chat_input("이탈 사유와 대응책을 물어보세요..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
+        if "messages" not in st.session_state:
+            st.session_state.messages = [
+                {
+                    "role": "assistant",
+                    "content": "선택된 고객 기준으로 이탈 사유와 방어 전략을 도와드리겠습니다."
+                }
+            ]
+
+        chat_holder = st.container(height=450)
         with chat_holder:
-            with st.chat_message("user"): st.markdown(prompt)
-            with st.chat_message("assistant"):
-                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                context = f"[고객 상황] 이탈확률:{final_prob:.1f}%, 요금:${sb_monthly}(상위{m_top:.1f}%), 기간:{sb_tenure}개월, 기술지원:{sb_tech}, 인터넷:{sb_internet}, 사고:{incident_type}."
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "system", "content": "너는 통신사 리스크 전문가야. 한국어로 답변해."},
-                              {"role": "system", "content": context},
-                              *[{"role": m["role"], "content": m["content"]} for m in st.session_state.messages]],
-                    stream=True
-                )
-                full_res = st.write_stream(response)
-        st.session_state.messages.append({"role": "assistant", "content": full_res})
+            for m in st.session_state.messages:
+                with st.chat_message(m["role"]):
+                    st.markdown(m["content"])
+
+        if prompt := st.chat_input("선택 고객의 이탈 사유와 대응책을 물어보세요..."):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+
+            with chat_holder:
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+
+                with st.chat_message("assistant"):
+                    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+                    explanation_text = "\n".join(
+                        [f"- {exp}" for exp in selected_customer_result.get("explanations", [])]
+                    )
+
+                    context = f"""
+                    [선택 고객 정보]
+                    고객 ID: {selected_customer_result.get("customer_id")}
+                    예측 결과: {selected_customer_result.get("prediction_label")}
+                    이탈 확률: {selected_customer_result.get("churn_probability")}
+                    위험 등급: {selected_customer_result.get("risk_level")}
+
+                    [설명 근거]
+                    {explanation_text}
+
+                    [원본 고객 데이터]
+                    {selected_customer_data}
+                    """
+
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": (
+                                    "너는 통신사 고객 유지 전략 전문가다. "
+                                    "반드시 제공된 고객 예측 결과와 설명 근거를 바탕으로만 답변하고, "
+                                    "한국어로 실무적인 대응 전략을 제안하라. "
+                                    "가능하면 1) 이탈 가능 원인, 2) 추천 혜택, 3) 예상 효과 순서로 답하라."
+                                ),
+                            },
+                            {"role": "system", "content": context},
+                            *[
+                                {"role": m["role"], "content": m["content"]}
+                                for m in st.session_state.messages
+                            ],
+                        ],
+                        stream=True,
+                    )
+
+                    full_res = st.write_stream(response)
+
+            st.session_state.messages.append({"role": "assistant", "content": full_res})
+# ==> 이제 챗봇은 실제 /batch-predict와 /high-risk 결과에서 뽑은 고객의 예측값과 설명 근거를 기반으로 답하게 됨!
+
 
 # --- [Tab 2: 최신 동향 & 혜택 (보정됨)] ---
 with tab2:

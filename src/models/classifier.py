@@ -266,7 +266,7 @@ def train_with_cv_threshold(csv_path: str, model_name: str) -> dict:
 
     print("\n[test metrics with stable threshold]")
     print({
-        "accuracy": fold_metrics["accuracy"],
+        "accuracy": round(test_metrics["accuracy"], 4),
         "f1": round(test_metrics["f1"], 4),
         "precision": round(test_metrics["precision"], 4),
         "recall": round(test_metrics["recall"], 4),
@@ -358,7 +358,7 @@ summary_df = pd.DataFrame([
         "cv_threshold_mean": top5_result["cv_threshold_mean"],
         "cv_threshold_median": top5_result["cv_threshold_median"],
         "selected_threshold": top5_result["threshold"],
-        "test_accuracy": full_result["test_metrics"]["accuracy"],
+        "test_accuracy": top5_result["test_metrics"]["accuracy"],
         "test_f1": top5_result["test_metrics"]["f1"],
         "test_precision": top5_result["test_metrics"]["precision"],
         "test_recall": top5_result["test_metrics"]["recall"],

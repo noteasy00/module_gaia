@@ -1,36 +1,71 @@
-import joblib
+import pickle
+from functools import lru_cache
+from typing import Any
+import numpy as np
 import pandas as pd
 
-MODEL_PATH = "churn_model.pkl"
-FEATURE_COLUMNS_PATH = "feature_columns.pkl"
-THRESHOLD_PATH = "best_threshold.pkl"
-
-DROP_COLS = ["Churn"]  # target only
+BUNDLE_PATH = "../../ckpt/xgb_top5_cv.pkl"
+DROP_COLS = ["Churn"]
 
 
-def preprocess_customer_data(customer_data: dict, feature_columns: list) -> pd.DataFrame:
-    df = pd.DataFrame([customer_data])
+@lru_cache(maxsize=1)
+def _load_bundle():
+    with open(BUNDLE_PATH, "rb") as f:
+        bundle = pickle.load(f)
+    return bundle
 
-    # Remove target if accidentally included
+
+def _prepare_raw_df(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
+    df = df.copy()
+
+    # target 제거
     df = df.drop(columns=[col for col in DROP_COLS if col in df.columns], errors="ignore")
 
-    # One-hot encode exactly like training
-    df = pd.get_dummies(df, drop_first=True)
+    feature_columns = bundle["feature_columns"]
+    numeric_features = bundle.get("numeric_features", [])
+    categorical_features = bundle.get("categorical_features", [])
 
-    # Convert bool columns to int if any
+    # 학습 시 기대한 raw feature column이 없으면 채워주기
+    for col in feature_columns:
+        if col not in df.columns:
+            if col in numeric_features:
+                df[col] = 0
+            else:
+                df[col] = "Unknown"
+
+    # extra column 제거 + 순서 정렬
+    df = df.reindex(columns=feature_columns)
+
+    # bool 처리
     bool_cols = df.select_dtypes(include=["bool"]).columns
     if len(bool_cols) > 0:
         df[bool_cols] = df[bool_cols].astype(int)
 
-    # Add missing training columns
-    for col in feature_columns:
-        if col not in df.columns:
-            df[col] = 0
+    # 숫자형 결측 보정
+    for col in numeric_features:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
-    # Reindex to exact training schema
-    df = df.reindex(columns=feature_columns, fill_value=0)
+    # 범주형 결측 보정
+    for col in categorical_features:
+        if col in df.columns:
+            df[col] = df[col].fillna("Unknown").astype(str)
 
     return df
+
+
+def _predict_proba_df(df: pd.DataFrame):
+    bundle = _load_bundle()
+    raw_df = _prepare_raw_df(df, bundle)
+
+    preprocessor = bundle["preprocessor"]
+    model = bundle["model"]
+    threshold = float(bundle["threshold"])
+
+    X_processed = preprocessor.transform(raw_df)
+    probs = model.predict_proba(X_processed)[:, 1]
+
+    return probs, threshold, bundle
 
 
 def build_explanations(customer_data: dict, churn_probability: float) -> list:
@@ -109,16 +144,15 @@ def get_risk_level(churn_probability: float) -> str:
 
 def predict_churn(customer_data: dict) -> dict:
     try:
-        model = joblib.load(MODEL_PATH)
-        feature_columns = joblib.load(FEATURE_COLUMNS_PATH)
-        threshold = joblib.load(THRESHOLD_PATH)
+        df = pd.DataFrame([customer_data])
+        probs, threshold, bundle = _predict_proba_df(df)
 
-        X_input = preprocess_customer_data(customer_data, feature_columns)
-        churn_probability = float(model.predict_proba(X_input)[0][1])
+        churn_probability = float(probs[0])
         prediction = int(churn_probability >= threshold)
 
         return {
             "success": True,
+            "model_name": bundle.get("model_name", "xgb_top5_cv"),
             "churn_probability": round(churn_probability, 4),
             "prediction": prediction,
             "prediction_label": "Churn" if prediction == 1 else "No Churn",
@@ -175,41 +209,31 @@ def simulate_churn_change(customer_data: dict, changes: dict) -> dict:
             "success": False,
             "error": str(e)
         }
+
+
 def batch_predict(customers: list[dict]) -> dict:
     try:
-        model, feature_columns, threshold = _load_artifacts()
-
         if not customers:
             return {"success": False, "error": "customers list is empty"}
 
         rows = []
+        ids = []
+
         for idx, customer in enumerate(customers):
             row = customer.copy()
-            row["_row_id"] = customer.get("customer_id", f"row_{idx}")
+            row_id = row.get("customer_id", f"row_{idx}")
+            ids.append(row_id)
             rows.append(row)
 
-        raw_df = pd.DataFrame(rows)
-        ids = raw_df["_row_id"].tolist()
-        feature_df = raw_df.drop(columns=["_row_id"], errors="ignore")
-
-        encoded = pd.get_dummies(feature_df, drop_first=True)
-        bool_cols = encoded.select_dtypes(include=["bool"]).columns
-        if len(bool_cols) > 0:
-            encoded[bool_cols] = encoded[bool_cols].astype(int)
-
-        for col in feature_columns:
-            if col not in encoded.columns:
-                encoded[col] = 0
-
-        encoded = encoded.reindex(columns=feature_columns, fill_value=0)
-
-        probs = model.predict_proba(encoded)[:, 1]
+        df = pd.DataFrame(rows)
+        probs, threshold, bundle = _predict_proba_df(df)
 
         results = []
         for i, prob in enumerate(probs):
             prob = float(prob)
             pred = int(prob >= threshold)
             customer_data = customers[i]
+
             results.append({
                 "customer_id": ids[i],
                 "churn_probability": round(prob, 4),
@@ -222,10 +246,12 @@ def batch_predict(customers: list[dict]) -> dict:
 
         return {
             "success": True,
+            "model_name": bundle.get("model_name", "xgb_top5_cv"),
             "count": len(results),
-            "threshold_used": threshold,
+            "threshold_used": float(threshold),
             "results": results
         }
+
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -254,4 +280,3 @@ def filter_high_risk_customers(customers: list[dict], threshold: float = 0.7, li
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-

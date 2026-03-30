@@ -3,15 +3,17 @@ import sys
 import time
 import json
 import requests
+from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 tools_folder = os.path.abspath(os.path.join(current_dir, '..', 'tools'))
 sys.path.append(tools_folder)
-from web_search_v2 import get_telco_trend_with_news
+from src.tools.web_search_v2 import get_telco_trend_with_news
 
-load_dotenv()
+ROOT_DIR = Path(__file__).resolve().parents[2]   # 프로젝트 루트에 맞게 조정
+load_dotenv(ROOT_DIR / ".env", override=True)
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ==========================================
@@ -32,9 +34,14 @@ SYSTEM_INSTRUCTIONS = """
    - 예: 요금이 부담스러운 고객 -> 요금 할인 프로모션 / 혜택이 부족한 고객 -> 부가 서비스(OTT 등) 무료 체험권.
 
 3. 실행 문구 생성:
-   - 선정된 타겟에게 보낼 마케팅 메시지를 작성한다.
-4. 서버 상태 체크:
-   - 서버 연결 상태를 확인해야 할 경우 check_api_health 도구를 사용한다.
+   - 선정된 고객에게 보낼 마케팅 메시지를 고객별로 작성한다.
+   - 메시지는 짧고 설득력 있게 작성한다.
+
+4. 툴 사용 원칙:
+    - 서버 연결 상태를 확인해야 할 경우 check_api_health 도구를 사용한다.
+    - 여러 고객을 분석할 때는 predict_batch_customers를 우선 사용한다.
+    - 고위험 고객 선별이 필요하면 get_high_risk_customers를 사용한다.
+    - 혜택 전후 효과 비교가 필요하면 simulate_customer_offer를 사용한다.
 
 # 출력 가이드
 결과물은 반드시 다음 구조를 포함해야 한다:
@@ -45,6 +52,9 @@ SYSTEM_INSTRUCTIONS = """
 
 # 제약 사항
 - 비즈니스 용어를 사용하되, 실행 가능한(Actionable) 제안을 할 것.
+- 답변은 반드시 한국어로, 너무 길지 않게, 발표용 데모에 적합한 형태로 정리할 것.
+- 근거 없는 수치를 임의로 만들지 않는다.
+- ROI는 명확한 비용 정보가 없으면 정성적 효과 또는 가정 기반 추정으로 제시한다.
 """
 
 # ==========================================
@@ -182,59 +192,79 @@ API_BASE_URL = "http://127.0.0.1:8000"
 
 def execute_ml_logic(tool_calls):
     tool_outputs = []
-    
+
     for tool_call in tool_calls:
         func_name = tool_call.function.name
         args = json.loads(tool_call.function.arguments)
-        
+
         print(f"\n[시스템] AI가 {func_name} 기능을 실행합니다...")
-        
+
         output = {}
         try:
-            
             if func_name == "predict_single_customer":
-                res = requests.post(f"{API_BASE_URL}/predict", json=args)
+                res = requests.post(f"{API_BASE_URL}/predict", json=args, timeout=30)
+                res.raise_for_status()
                 output = res.json()
-                
-         
+
             elif func_name == "simulate_customer_offer":
-                res = requests.post(f"{API_BASE_URL}/simulate", json=args)
+                res = requests.post(f"{API_BASE_URL}/simulate", json=args, timeout=30)
+                res.raise_for_status()
                 output = res.json()
-                
 
             elif func_name == "predict_batch_customers":
-                res = requests.post(f"{API_BASE_URL}/batch-predict", json=args)
+                res = requests.post(f"{API_BASE_URL}/batch-predict", json=args, timeout=60)
+                res.raise_for_status()
                 output = res.json()
-                
 
             elif func_name == "get_high_risk_customers":
-                res = requests.post(f"{API_BASE_URL}/high-risk", json=args)
+                res = requests.post(f"{API_BASE_URL}/high-risk", json=args, timeout=60)
+                res.raise_for_status()
                 output = res.json()
 
             elif func_name == "check_api_health":
-                res = requests.get(f"{API_BASE_URL}/health")
+                res = requests.get(f"{API_BASE_URL}/health", timeout=10)
+                res.raise_for_status()
                 output = res.json()
 
-            elif func_name == "search_telco_trends":
-                search_query = args.get("query", "통신 산업 최신 동향")
-                summary_lines, urls = get_telco_trend_with_news(search_query)
+            elif func_name == "send_promotions":
+                target_ids = args.get("target_ids", [])
+                discount_rate = args.get("discount_rate", 0)
+
                 output = {
-                    "status": "success",
-                    "trend_summary": summary_lines,
-                    "reference_urls": urls
+                    "success": True,
+                    "sent_count": len(target_ids),
+                    "discount_rate": discount_rate,
+                    "message": f"{len(target_ids)}명의 고객에게 {discount_rate*100:.0f}% 할인 프로모션을 발송했습니다. (시뮬레이션)"
                 }
+
             else:
-                output = {"error": "알 수 없는 툴입니다."}
-                
+                output = {"success": False, "error": f"알 수 없는 툴입니다: {func_name}"}
+
+        except requests.HTTPError:
+            try:
+                output = {
+                    "success": False,
+                    "error": f"API 오류: {res.status_code}",
+                    "detail": res.json()
+                }
+            except Exception:
+                output = {
+                    "success": False,
+                    "error": f"API 오류: {res.status_code}",
+                    "detail": res.text
+                }
+
         except Exception as e:
-            output = {"error": f"API 통신 실패: {str(e)}. 서버가 켜져 있는지 확인하세요."}
-            
+            output = {
+                "success": False,
+                "error": f"API 통신 실패: {str(e)}. 서버가 켜져 있는지 확인하세요."
+            }
 
         tool_outputs.append({
             "tool_call_id": tool_call.id,
             "output": json.dumps(output, ensure_ascii=False)
         })
-        
+
     return tool_outputs
 
 # ==========================================
