@@ -144,21 +144,6 @@ def get_ai_security_briefing(incident_type):
     summary = response.choices[0].message.content.strip().split('\n')
     return summary, feed.entries[:6]
 
-# 기존 정책 정보 수집 함수 (Tab 2 하단용)
-@st.cache_data(ttl=1800)
-def fetch_recent_info(query, months_back=2):
-    rss_url = f"https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR:ko"
-    feed = feedparser.parse(rss_url)
-    filtered = []
-    now = datetime.now()
-    start_date = now - timedelta(days=months_back*30)
-    for entry in feed.entries:
-        try:
-            pub_date = datetime(*entry.published_parsed[:6])
-            if pub_date >= start_date: filtered.append(entry)
-        except: continue
-    return filtered[:5]
-
 # 추가
 def post_json(endpoint: str, payload: dict):
     url = f"{API_BASE_URL}{endpoint}"
