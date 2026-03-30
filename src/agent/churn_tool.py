@@ -73,6 +73,7 @@ def _predict_proba_df(df: pd.DataFrame):
 def build_explanations(customer_data: dict, churn_probability: float) -> list:
     explanations = []
 
+    # 데이터 추출
     tenure = customer_data.get("tenure", 0)
     tenure_group = customer_data.get("Tenure_Group", "")
     monthly_charges = customer_data.get("MonthlyCharges", 0)
@@ -84,54 +85,57 @@ def build_explanations(customer_data: dict, churn_probability: float) -> list:
     service_engagement = customer_data.get("Service_Engagement", 0)
     contract = customer_data.get("Contract", "")
 
+    # 1. 계약 형태 관련
     if contract == "Month-to-month":
-        explanations.append("Month-to-month contract tends to increase churn risk.")
+        explanations.append("단기 계약(Month-to-month)은 이탈 위험을 높이는 주요 요인입니다.")
     elif contract in ["One year", "Two year"]:
-        explanations.append("Long-term contract tends to reduce churn risk.")
+        explanations.append("장기 계약 상태로, 이탈 위험을 낮추는 데 기여하고 있습니다.")
 
+    # 2. 서비스 특성 관련
     if internet_service == "Fiber optic":
-        explanations.append("Fiber optic service may be associated with higher churn risk.")
+        explanations.append("광랜(Fiber optic) 서비스 이용자는 품질에 민감하여 이탈 가능성이 높게 관찰됩니다.")
 
     if payment_method == "Electronic check":
-        explanations.append("Electronic check customers may show higher churn tendency.")
+        explanations.append("전자 수표(Electronic check) 결제 방식 사용 고객군에서 높은 이탈 경향이 나타납니다.")
 
     if paperless_billing == "Yes":
-        explanations.append("Paperless billing was often observed among higher-risk customers.")
+        explanations.append("종이 없는 고지서(Paperless billing) 이용 고객은 고위험군에서 자주 발견되는 특징입니다.")
 
+    # 3. 기술 지원 관련
     if tech_support == "No":
-        explanations.append("Lack of tech support may increase churn risk.")
+        explanations.append("전문 기술 지원(TechSupport) 부재는 서비스 불만족 및 이탈로 이어질 수 있습니다.")
     elif tech_support == "Yes":
-        explanations.append("Having tech support may help reduce churn risk.")
+        explanations.append("전문 기술 지원 이용은 고객 유지에 긍정적인 영향을 미칩니다.")
 
+    # 4. 서비스 인게이지먼트 관련
     if isinstance(service_engagement, (int, float)):
         if service_engagement <= 1:
-            explanations.append(f"Low service engagement ({service_engagement}) may increase churn risk.")
+            explanations.append(f"낮은 서비스 결합도({service_engagement}개)는 브랜드 충성도를 약화시키는 요인입니다.")
         elif service_engagement >= 4:
-            explanations.append(f"Higher service engagement ({service_engagement}) may help reduce churn risk.")
+            explanations.append(f"높은 서비스 결합도({service_engagement}개)는 강력한 이탈 방지 요인으로 작용합니다.")
 
+    # 5. 가입 기간(Tenure) 관련
     if isinstance(tenure, (int, float)):
         if tenure < 12:
-            explanations.append(f"Short tenure ({tenure} months) is often associated with higher churn risk.")
+            explanations.append(f"가입 초기 단계({tenure}개월)로, 서비스 정착을 위한 집중 관리가 필요합니다.")
         elif tenure >= 36:
-            explanations.append(f"Longer tenure ({tenure} months) tends to reduce churn risk.")
+            explanations.append(f"장기 이용 고객({tenure}개월)으로, 높은 충성도를 유지하고 있습니다.")
 
-    if tenure_group == "New(0-1yr)":
-        explanations.append("Newer customers are often more likely to churn.")
-    elif tenure_group == "Loyal(3yr+)":
-        explanations.append("Long-term loyal customers are generally less likely to churn.")
-
+    # 6. 월 요금 관련
     if isinstance(monthly_charges, (int, float)) and monthly_charges >= 80:
-        explanations.append(f"Monthly charges ({monthly_charges}) are relatively high, which may increase churn risk.")
+        explanations.append(f"상대적으로 높은 월 요금(${monthly_charges})이 이탈 위험을 증가시킬 수 있습니다.")
 
+    # 7. 고령자 여부
     if senior_citizen == 1:
-        explanations.append("Senior citizen status may influence churn depending on service and pricing conditions.")
+        explanations.append("고령 고객층의 특성에 맞는 맞춤형 혜택 안내가 권장됩니다.")
 
+    # 8. 종합 결과 문구
     if churn_probability >= 0.70:
-        explanations.append("Overall profile indicates high churn risk.")
+        explanations.append("전체적인 프로필이 **매우 높은 이탈 위험**을 나타내고 있습니다.")
     elif churn_probability >= 0.40:
-        explanations.append("Overall profile indicates moderate churn risk.")
+        explanations.append("전체적인 프로필이 **보통 수준의 이탈 위험**을 나타내고 있습니다.")
     else:
-        explanations.append("Overall profile indicates relatively low churn risk.")
+        explanations.append("전체적인 프로필이 **비교적 낮은 이탈 위험**을 나타내고 있습니다.")
 
     return explanations
 
@@ -188,12 +192,13 @@ def simulate_churn_change(customer_data: dict, changes: dict) -> dict:
         after_prob = after_result["churn_probability"]
         delta = round(after_prob - before_prob, 4)
 
+        # 텍스트 메시지 한글화
         if delta < 0:
-            impact = "Churn risk decreased"
+            impact = "이탈 위험도가 감소했습니다."
         elif delta > 0:
-            impact = "Churn risk increased"
+            impact = "이탈 위험도가 증가했습니다."
         else:
-            impact = "No significant change"
+            impact = "유의미한 변화가 없습니다."
 
         return {
             "success": True,
