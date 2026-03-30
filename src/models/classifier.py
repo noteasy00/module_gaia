@@ -45,7 +45,7 @@ target_col = "Churn"
 
 def build_preprocessor(X: pd.DataFrame) -> tuple[ColumnTransformer, list, list]:
     """
-    숫자형 / 범주형 자동 분리 후 전처리기 생성
+    숫자형 / 범주형 자동 분리 후 전처리기 생성 (ui 팀 바로 사용가능)
     """
     numeric_features = X.select_dtypes(include=["int64", "float64"]).columns.tolist()
     categorical_features = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
@@ -68,7 +68,7 @@ def build_preprocessor(X: pd.DataFrame) -> tuple[ColumnTransformer, list, list]:
 
 def tune_threshold(y_true, prob, thresholds=None):
     """
-    validation F1 기준 최적 threshold 탐색
+    validation - F1 기준 최적 threshold 탐색
     """
     if thresholds is None:
         thresholds = np.arange(0.1, 0.91, 0.02)
@@ -88,7 +88,7 @@ def tune_threshold(y_true, prob, thresholds=None):
 
 def evaluate_classifier(y_true, prob, threshold):
     """
-    확률 + threshold 기반 평가
+    분류기 평가 지표 계산 총집합
     """
     pred = (prob >= threshold).astype(int)
 
@@ -118,15 +118,17 @@ def build_xgb_classifier(y_train):
     neg = int((y_train == 0).sum())
     scale_pos_weight = neg / pos if pos > 0 else 1.0
 
+    # 이 설정은(outputs/classifier_comparison.ipynb)에서 실험 후 얻은 최적 하이퍼파라미터 조합임!
+    # 이 조합으로 모델 train 진행
     model = XGBClassifier(
-        n_estimators=500,
+        n_estimators=200,
         learning_rate= 0.05,
         max_depth=3,
         min_child_weight=3,
-        subsample=0.85,
-        colsample_bytree=1.0,
-        reg_alpha=0.1,
-        reg_lambda=5.0,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=0.0,
+        reg_lambda=1.0,
         objective="binary:logistic",
         eval_metric="logloss",
         random_state=RANDOM_STATE,
@@ -151,9 +153,9 @@ def save_confusion_matrix_figure(y_true, prob, threshold, save_path, title="Conf
 
 
 
-# (메인) 5-fold CV로 안정 threshold 찾아 학습
+# 5-fold CV로 안정 threshold 찾아 학습
 def train_with_cv_threshold(csv_path: str, model_name: str) -> dict:
-    print("\n" + "=" * 80)
+    print("\n","=" * 80)
     print(f"[학습 시작] {model_name} | file={csv_path}")
 
     df = pd.read_csv(csv_path)
@@ -162,7 +164,7 @@ def train_with_cv_threshold(csv_path: str, model_name: str) -> dict:
     y = df[target_col]
     X = df.drop(columns=[target_col]).copy()
 
-    # 먼저 test 홀드아웃
+
     X_dev, X_test, y_dev, y_test = train_test_split(
         X, y,
         test_size=0.2,
@@ -197,7 +199,7 @@ def train_with_cv_threshold(csv_path: str, model_name: str) -> dict:
         va_prob = model.predict_proba(X_va_enc)[:, 1]
         oof_prob[va_idx] = va_prob
 
-        best_thr, best_f1 = tune_threshold(y_va.to_numpy(), va_prob)
+        best_thr, _ = tune_threshold(y_va.to_numpy(), va_prob)
         fold_thresholds.append(best_thr)
 
         fold_metrics = evaluate_classifier(y_va.to_numpy(), va_prob, best_thr)
@@ -274,7 +276,7 @@ def train_with_cv_threshold(csv_path: str, model_name: str) -> dict:
         "pr_auc": round(test_metrics["pr_auc"], 4),
         "threshold": round(test_metrics["threshold"], 4)
     })
-
+    
     save_confusion_matrix_figure(
     y_test.to_numpy(),
     test_prob,
@@ -336,7 +338,7 @@ top5_result = train_with_cv_threshold(TOP5_PATH, "xgb_top5_cv")
 
 
 # =========================================================
-# 3. 결과 비교
+# 3. 2가지 데이터셋 결과 비교
 # =========================================================
 summary_df = pd.DataFrame([
     {
@@ -366,12 +368,12 @@ summary_df = pd.DataFrame([
         "test_pr_auc": top5_result["test_metrics"]["pr_auc"]
     }
 ]).sort_values(
-    # 이탈 고객을 잘 찾는 능력이 중요. PR-AUC와 F1 Score 집중
+    # 이탈 고객을 잘 찾는 능력이 중요 -> PR-AUC와 F1 Score 우선 집중
     by=["test_pr_auc", "test_f1", "test_recall", "test_roc_auc"],
     ascending=False
 ).reset_index(drop=True)
 
-print("\n" + "=" * 80)
+print("\n","=" * 80)
 print("[최종 비교 결과]")
 print(summary_df)
 
@@ -383,11 +385,11 @@ print("-", os.path.join(OUTPUT_DIR, "cv_threshold_model_comparison.csv"))
 # 3. 결과 저장
 # =========================================================
 
-# fold별 csv
+# fold별 csv 저장
 full_result["cv_results"].to_csv(os.path.join(OUTPUT_DIR, "xgb_full_cv_fold_results.csv"), index=False)
 top5_result["cv_results"].to_csv(os.path.join(OUTPUT_DIR, "xgb_top5_cv_fold_results.csv"), index=False)
 
-# pkl 저장
+# 중요!! pkl 저장 (full 버전도 저장)
 save_pickle_bundle(full_result, os.path.join(SAVE_DIR, "xgb_full_cv.pkl"))
 save_pickle_bundle(top5_result, os.path.join(SAVE_DIR, "xgb_top5_cv.pkl"))
 
