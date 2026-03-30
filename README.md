@@ -36,6 +36,7 @@ outputs/xgb_top5_cv_test_confusion_matrix.png
 app.py 실제 위치에 따라 아래 중 맞는 명령 사용
 프로젝트 루트(module_gaia)에서 실행 시, 
 uvicorn src.app.app:app --reload --host 127.0.0.1 --port 8000
+uvicorn src.agent.app:app --reload --host 127.0.0.1 --port 8000 위에 안되면 이걸로
 
 ## Streamlit 프론트 실행
 python -m streamlit run src/app/front.py
