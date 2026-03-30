@@ -1,9 +1,15 @@
 import os
+import sys
 import time
 import json
 import requests
 from openai import OpenAI
 from dotenv import load_dotenv
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+tools_folder = os.path.abspath(os.path.join(current_dir, '..', 'tools'))
+sys.path.append(tools_folder)
+from web_search_v2 import get_telco_trend_with_news
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -137,6 +143,23 @@ tools = [
                 "required": ["target_ids", "discount_rate"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_telco_trends",
+            "description": "통신 산업의 최신 동향, 뉴스, 보안 이슈 등을 인터넷에서 검색하고 요약합니다.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string", 
+                        "description": "검색어 (예: '통신 산업 최신 동향 2026')"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]
 
@@ -191,6 +214,15 @@ def execute_ml_logic(tool_calls):
             elif func_name == "check_api_health":
                 res = requests.get(f"{API_BASE_URL}/health")
                 output = res.json()
+
+            elif func_name == "search_telco_trends":
+                search_query = args.get("query", "통신 산업 최신 동향")
+                summary_lines, urls = get_telco_trend_with_news(search_query)
+                output = {
+                    "status": "success",
+                    "trend_summary": summary_lines,
+                    "reference_urls": urls
+                }
             else:
                 output = {"error": "알 수 없는 툴입니다."}
                 
